@@ -1,0 +1,167 @@
+---
+- name: Provision dev-machine
+  hosts: all
+  remote_user: vagrant
+  tasks:
+    - name: Gather package facts
+      ansible.builtin.package_facts:
+        manager: apt
+    - name: Get Hashicorp repo key
+      become: true
+      ansible.builtin.get_url:
+        url: https://apt.releases.hashicorp.com/gpg
+        dest: /etc/apt/trusted.gpg.d/hashicorp.asc
+        mode: "744"
+        force: true
+    - name: Add Hashicorp repo to sources.list.d
+      become: true
+      ansible.builtin.apt_repository:
+        filename: hashicorp
+        repo: deb [signed-by=/etc/apt/trusted.gpg.d/hashicorp.asc] https://apt.releases.hashicorp.com focal main
+        update_cache: false
+        state: present
+    - name: Update the packages cache (apt-get update)
+      become: true
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 600
+    - name: Upgrade the OS (apt-get dist-upgrade)
+      become: true
+      ansible.builtin.apt:
+        upgrade: dist
+    - name: Install awscli
+      become: true
+      ansible.builtin.apt:
+        name:
+          - awscliv2
+        state: present
+        update_cache: false
+    - name: Install Terraform
+      become: true
+      ansible.builtin.apt:
+        name: terraform
+        state: present
+        update_cache: false
+    - name: Create docker config dir
+      become: true
+      ansible.builtin.file:
+        path: /etc/docker
+        owner: root
+        group: root
+        mode: "755"
+        state: directory
+    - name: Copy docker daemon config
+      become: true
+      ansible.builtin.copy:
+        src: ./files/configs/daemon.json
+        dest: /etc/docker/daemon.json
+        owner: root
+        group: root
+        mode: "644"
+    - name: Install docker
+      become: true
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose
+        state: present
+    - name: Start docker daemon
+      become: true
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+    - name: Add user to docker group
+      become: true
+      ansible.builtin.user:
+        name: vagrant
+        groups: docker
+        append: true
+    - name: Install code-server
+      become: true
+      when: '"code-server" not in ansible_facts.packages'
+      ansible.builtin.apt:
+        deb: https://github.com/coder/code-server/releases/download/v4.8.3/code-server_4.8.3_amd64.deb
+        state: present
+        update_cache: false
+    - name: Get code-server extensions facts
+      changed_when: false
+      register: installed_extensions
+      ansible.builtin.command: "code-server --list-extensions | tail -n +2"
+    - name: Install code-server extensions
+      when: 'item not in installed_extensions.stdout'
+      ansible.builtin.command: code-server --install-extension {{ item }}
+      with_items:
+        - redhat.vscode-yaml
+        - redhat.vscode-xml
+        - redhat.ansible
+        - hashicorp.terraform
+        - ms-azuretools.vscode-docker
+    - name: Create code-server config dir
+      ansible.builtin.file:
+        path: /home/vagrant/.config/code-server
+        owner: vagrant
+        group: vagrant
+        mode: "775"
+        state: directory
+    - name: Create code-server data dir
+      ansible.builtin.file:
+        path: /home/vagrant/.local/share/code-server
+        owner: vagrant
+        group: vagrant
+        mode: "775"
+        state: directory
+    - name: Copy code-server config
+      ansible.builtin.copy:
+        src: ./files/configs/code-server-config.yaml
+        dest: /home/vagrant/.config/code-server/config.yaml
+        owner: vagrant
+        group: vagrant
+        mode: "775"
+    - name: Copy code-server ssl cert and key
+      ansible.builtin.copy:
+        src: "./files/certs/{{ item }}"
+        dest: "/home/vagrant/.local/share/code-server/{{ item }}"
+        owner: vagrant
+        group: vagrant
+        mode: "775"
+      with_items:
+        - localhost.pem
+        - localhost-key.pem
+    - name: Enable code-server service
+      become: true
+      ansible.builtin.systemd:
+        name: code-server@vagrant
+        enabled: true
+        state: started
+    - name: Copy gitconfig from host to dev-machine
+      ansible.builtin.copy:
+        src: ~/.gitconfig
+        dest: /home/vagrant/.gitconfig
+        owner: vagrant
+        group: vagrant
+        mode: "664"
+    - name: Copy ssh keys from host to guest
+      become: true
+      ansible.builtin.copy:
+        src: "~/.ssh/{{ item.src }}"
+        dest: "/home/vagrant/.ssh/{{ item.dest }}"
+        owner: vagrant
+        group: vagrant
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: id_rsa, dest: id_rsa, mode: 600 }
+        - { src: id_rsa.pub, dest: id_rsa.pub, mode: 644 }
+    - name: Create repos dir
+      ansible.builtin.file:
+        path: /home/vagrant/git
+        mode: "775"
+        state: directory
+    - name: Clone repos
+      ansible.builtin.git:
+        repo: "{{ item.repo }}" # noqa: latest
+        dest: "{{ item.dest }}"
+        accept_hostkey: true
+        key_file: /home/vagrant/.ssh/id_rsa
+      loop:
+	- item
